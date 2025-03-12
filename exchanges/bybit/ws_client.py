@@ -55,6 +55,9 @@ class BybitWebSocketClient:
         # Initialize data storage for orderbook
         self.data = {}
         
+        # Initialize data storage for tickers (including funding rate information)
+        self.ticker_data = {}
+        
         # Validate channel type
         if self.channel_type not in self.MAINNET_URLS:
             raise ValueError(f"Invalid channel type: {channel_type}. Must be one of {list(self.MAINNET_URLS.keys())}")
@@ -139,6 +142,10 @@ class BybitWebSocketClient:
             if "topic" in data:
                 topic = data["topic"]
                 topic_base = topic.split(".")[0]
+                
+                # Process ticker data
+                if topic_base == "tickers":
+                    self._process_ticker_data(data)
                 
                 # Check for specific topic callback
                 if topic in self.callbacks:
@@ -378,6 +385,20 @@ class BybitWebSocketClient:
         topic = f"publicTrade.{symbol}"
         return self.subscribe(topic, callback)
     
+    def subscribe_ticker(self, symbol: str, callback: Optional[Callable] = None):
+        """
+        Subscribe to ticker updates for a specific symbol.
+        
+        Args:
+            symbol: The trading pair symbol (e.g., "BTCUSDT")
+            callback: Callback function to process ticker messages
+        
+        Returns:
+            bool: True if subscription was successful, False otherwise
+        """
+        topic = f"tickers.{symbol}"
+        return self.subscribe(topic, callback)
+    
     def close(self):
         """
         Close the WebSocket connection.
@@ -404,6 +425,140 @@ class BybitWebSocketClient:
         else:
             # Return all data
             return self.data
+    
+    def get_ticker_data(self, symbol: Optional[str] = None):
+        """
+        Get the latest ticker data.
+        
+        Args:
+            symbol: Optional symbol to get data for. If None, returns all data.
+        
+        Returns:
+            dict: The latest ticker data
+        """
+        if symbol:
+            return self.ticker_data.get(symbol, {})
+        else:
+            return self.ticker_data
+    
+    def get_funding_rate(self, symbol: str) -> float:
+        """
+        Get the current funding rate for a symbol.
+        
+        Args:
+            symbol: Symbol to get funding rate for
+            
+        Returns:
+            float: Current funding rate or 0 if not available
+        """
+        if symbol in self.ticker_data:
+            return self.ticker_data[symbol].get('funding_rate', 0)
+        return 0
+    
+    def get_next_funding_time(self, symbol: str) -> int:
+        """
+        Get the next funding time for a symbol.
+        
+        Args:
+            symbol: Symbol to get next funding time for
+            
+        Returns:
+            int: Next funding time in milliseconds or 0 if not available
+        """
+        if symbol in self.ticker_data:
+            return self.ticker_data[symbol].get('next_funding_time', 0)
+        return 0
+    
+    def _process_ticker_data(self, message):
+        """
+        Process ticker data message and update internal state.
+        
+        Args:
+            message: The ticker message from WebSocket
+        """
+        try:
+            topic = message.get("topic", "")
+            message_type = message.get("type", "snapshot")
+            
+            # Extract symbol from topic
+            if "." in topic:
+                symbol = topic.split(".")[1]
+            else:
+                logger.warning(f"Could not extract symbol from topic: {topic}")
+                return
+            
+            # Process ticker data
+            data = message.get("data", {})
+            if not data:
+                logger.warning(f"No data in ticker message for {symbol}")
+                return
+            
+            # Log raw data for debugging
+            logger.debug(f"Raw ticker data for {symbol}: {data}")
+            
+            # Get funding rate related fields directly 
+            funding_rate = 0
+            next_funding_time = 0
+            
+            # Handle different data formats (snapshot vs delta, object vs array)
+            if isinstance(data, list):
+                if data:  # Use first item if data is a list
+                    data = data[0]
+                else:
+                    logger.warning(f"Empty data list for {symbol}")
+                    return
+            
+            # Now data should be a dict
+            if isinstance(data, dict):
+                # Try different field names for funding rate
+                if 'fundingRate' in data:
+                    funding_rate = float(data['fundingRate'])
+                elif 'r' in data:  # Some APIs use shortened field names
+                    funding_rate = float(data['r'])
+                    
+                # Try different field names for next funding time
+                if 'nextFundingTime' in data:
+                    next_funding_time = int(data['nextFundingTime'])
+                elif 'T' in data:  # Some APIs use shortened field names
+                    next_funding_time = int(data['T'])
+                    
+                # Store ticker data with focus on funding information
+                ticker_data = {
+                    'symbol': symbol,
+                    'funding_rate': funding_rate,
+                    'next_funding_time': next_funding_time
+                }
+                
+                # Add all other fields dynamically
+                for key, value in data.items():
+                    # Convert common numeric fields to float
+                    if key in ['lastPrice', 'markPrice', 'indexPrice',
+                               'bid1Price', 'bid1Size', 'ask1Price', 'ask1Size',
+                               'highPrice24h', 'lowPrice24h', 'volume24h', 'turnover24h',
+                               'price24hPcnt', 'openInterest', 'openInterestValue']:
+                        try:
+                            ticker_data[key.lower()] = float(value)
+                        except (TypeError, ValueError):
+                            ticker_data[key.lower()] = value
+                    else:
+                        ticker_data[key.lower()] = value
+                
+                # Make sure we have convenient access to key fields
+                if 'markprice' in ticker_data and 'mark_price' not in ticker_data:
+                    ticker_data['mark_price'] = ticker_data['markprice']
+                    
+                if 'lastprice' in ticker_data and 'last_price' not in ticker_data:
+                    ticker_data['last_price'] = ticker_data['lastprice']
+                    
+                # Store the processed data
+                self.ticker_data[symbol] = ticker_data
+                
+                # Log successful update
+                logger.info(f"Updated ticker data for {symbol} - Funding rate: {funding_rate}, Next funding time: {next_funding_time}")
+                
+        except Exception as e:
+            logger.error(f"Error processing ticker data: {e}")
+            logger.error(f"Raw message: {message}")
 
 # Example usage
 if __name__ == "__main__":
