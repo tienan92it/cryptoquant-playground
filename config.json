@@ -1,11 +1,11 @@
 {
   "symbols": ["btcusdt", "ethusdt", "solusdt", "bnbusdt", "xrpusdt", "adausdt"],
-  "use_all_symbols": false,
-  "position_size_usd": 10000,
+  "use_all_symbols": true,
+  "position_size_usd": 1000,
   "min_funding_threshold": 0.0001,
   "futures_fee_rate": 0.0004,
   "slippage": 0.0003,
-  "check_interval": 30,
+  "check_interval": 1,
   
   "symbol_filters": {
     "min_price": 0.1,

@@ -502,12 +502,15 @@ class FundingArbitrageStrategy:
                 # Highlight by prefixing top opportunities
                 prefix = "→ " if i < self.max_positions and not self.positions[symbol]['active'] else "  "
                 
+                # Format time to funding as countdown timer
+                time_to_funding = self._format_countdown(m['time_to_funding_hours'])
+                
                 best_data.append([
                     prefix + symbol,
                     f"{m['funding_rate']*100:.5f}%",
                     m['position_side'],
                     m['next_funding_time'],
-                    f"{m['time_to_funding_hours']:.2f} hrs",
+                    time_to_funding,  # Changed to countdown format
                     f"${m['expected_profit_per_funding']:.4f}",
                     f"{m['break_even_events']} events",
                     f"{m['apr']*100:.2f}%", 
@@ -515,7 +518,8 @@ class FundingArbitrageStrategy:
                 ])
             
             print(tabulate(best_data, headers=["Symbol", "Funding Rate", "Side", 
-                                          "Next Funding", "Time to Funding", "Profit/Funding", 
+                                          "Next Funding", "Countdown", 
+                                          "Profit/Funding", 
                                           "Break Even", "APR", "Position"]))
         else:
             print("\nNo profitable opportunities found at current thresholds.")
@@ -551,6 +555,23 @@ class FundingArbitrageStrategy:
         print(f"\n{'=' * 100}")
         print(f"Monitoring {len(self.metrics)} symbols - {len(self.ranked_symbols)} profitable opportunities")
         print(f"{'=' * 100}")
+    
+    def _format_countdown(self, hours):
+        """
+        Format hours to a countdown timer (HH:MM:SS)
+        
+        Args:
+            hours: Time in hours
+            
+        Returns:
+            Formatted string as HH:MM:SS
+        """
+        total_seconds = int(hours * 3600)
+        hours_part = total_seconds // 3600
+        minutes_part = (total_seconds % 3600) // 60
+        seconds_part = total_seconds % 60
+        
+        return f"{hours_part:02d}:{minutes_part:02d}:{seconds_part:02d}"
     
     def _place_futures_order(self, symbol, side, quantity, order_type):
         """

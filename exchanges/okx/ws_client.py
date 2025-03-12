@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("OkxWebSocketClient")
 
-# Global orderbook storage
+# Global data storage
 order_books = {}
+funding_rates = {} # Add storage for funding rates
 
 @dataclass
 class OrderBookLevel:
@@ -222,6 +223,9 @@ class OkxWebSocketClient:
             # Process the orderbook data
             self._process_orderbook_message(message_data)
             
+            # Process the funding rate data
+            self._process_funding_rate_message(message_data)
+            
             # Call specific callback if registered
             arg = message_data.get('arg', {})
             channel = arg.get('channel', '')
@@ -397,6 +401,43 @@ class OkxWebSocketClient:
             if data.get("checksum"):
                 order_books[inst_id].set_exch_check_sum(data["checksum"])
     
+    def _process_funding_rate_message(self, message):
+        """
+        Process funding rate message and update internal state.
+        """
+        arg = message.get("arg")
+        if not arg or arg.get("channel") != "funding-rate":
+            return
+            
+        data = message.get("data")
+        if not data:
+            return
+            
+        # Process funding rate data
+        for funding_info in data:
+            inst_id = funding_info.get("instId")
+            if not inst_id:
+                continue
+                
+            # Store funding rate data
+            funding_rates[inst_id] = {
+                'inst_id': inst_id,
+                'inst_type': funding_info.get("instType"),
+                'funding_rate': float(funding_info.get("fundingRate", "0")),
+                'funding_time': int(funding_info.get("fundingTime", "0")),
+                'next_funding_rate': funding_info.get("nextFundingRate", ""),
+                'next_funding_time': int(funding_info.get("nextFundingTime", "0")),
+                'min_funding_rate': float(funding_info.get("minFundingRate", "0")),
+                'max_funding_rate': float(funding_info.get("maxFundingRate", "0")),
+                'sett_funding_rate': float(funding_info.get("settFundingRate", "0")),
+                'sett_state': funding_info.get("settState"),
+                'premium': float(funding_info.get("premium", "0")),
+                'method': funding_info.get("method"),
+                'timestamp': int(funding_info.get("ts", "0"))
+            }
+            
+            logger.debug(f"Updated funding rate for {inst_id}: {funding_rates[inst_id]['funding_rate']}")
+
     def connect(self):
         """
         Connect to the OKX WebSocket server.
@@ -427,7 +468,12 @@ class OkxWebSocketClient:
         Resubscribe to all previous subscriptions after reconnection.
         """
         for symbol, channel in self.subscriptions.items():
-            self._subscribe_orderbook(symbol, channel)
+            if channel in ["books5", "books", "bbo-tbt", "books50-l2-tbt", "books-l2-tbt"]:
+                self._subscribe_orderbook(symbol, channel)
+            elif channel == "trades":
+                self.subscribe_trades(symbol)
+            elif channel == "funding-rate":
+                self.subscribe_funding_rate(symbol)
     
     def subscribe_orderbook(self, symbol: str, depth: str = "books5", callback: Optional[Callable] = None):
         """
@@ -502,6 +548,53 @@ class OkxWebSocketClient:
             bool: True if subscription was successful, False otherwise
         """
         channel = "trades"
+        
+        # Store the callback if provided
+        if callback:
+            callback_key = f"{channel}:{symbol}"
+            self.callbacks[callback_key] = callback
+        
+        # Store subscription for reconnection
+        self.subscriptions[symbol] = channel
+        
+        # Subscribe if connected
+        if self.connected:
+            try:
+                # Prepare subscription args
+                request = {
+                    "op": "subscribe",
+                    "args": [
+                        {
+                            "channel": channel,
+                            "instId": symbol
+                        }
+                    ]
+                }
+                
+                # Send subscription request
+                self.ws.send(json.dumps(request))
+                logger.info(f"Subscribed to {channel} for {symbol}")
+                return True
+            except Exception as e:
+                logger.error(f"Error subscribing to {channel} for {symbol}: {e}")
+                return False
+        else:
+            # Connect first
+            self.connect()
+            return True
+    
+    def subscribe_funding_rate(self, symbol: str, callback: Optional[Callable] = None):
+        """
+        Subscribe to funding rate updates for a specific symbol.
+        
+        Args:
+            symbol: Symbol to subscribe to (e.g., "BTC-USD-SWAP")
+            callback: Optional callback function for processing messages
+        
+        Returns:
+            bool: True if subscription was successful, False otherwise
+        """
+        channel = "funding-rate"
         
         # Store the callback if provided
         if callback:
@@ -616,6 +709,46 @@ class OkxWebSocketClient:
             logger.error(f"Error unsubscribing from {channel} for {symbol}: {e}")
             return False
     
+    def unsubscribe_funding_rate(self, symbol: str):
+        """
+        Unsubscribe from funding rate updates.
+        """
+        if not self.connected:
+            logger.warning("Cannot unsubscribe, not connected")
+            return False
+        
+        channel = "funding-rate"
+        try:
+            # Prepare unsubscription request
+            request = {
+                "op": "unsubscribe",
+                "args": [
+                    {
+                        "channel": channel,
+                        "instId": symbol
+                    }
+                ]
+            }
+            
+            # Send unsubscription request
+            self.ws.send(json.dumps(request))
+            
+            # Remove from our records
+            if symbol in self.subscriptions and self.subscriptions[symbol] == channel:
+                del self.subscriptions[symbol]
+            
+            # Remove callback if registered
+            callback_key = f"{channel}:{symbol}"
+            if callback_key in self.callbacks:
+                del self.callbacks[callback_key]
+            
+            logger.info(f"Unsubscribed from {channel} for {symbol}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error unsubscribing from {channel} for {symbol}: {e}")
+            return False
+    
     def _start_checksum_thread(self):
         """
         Start a thread to verify checksums periodically.
@@ -703,6 +836,49 @@ class OkxWebSocketClient:
             
             return result
     
+    def get_funding_rate_data(self, symbol: Optional[str] = None):
+        """
+        Get the latest funding rate data.
+        
+        Args:
+            symbol: Optional symbol to get data for. If None, returns all data.
+        
+        Returns:
+            dict: The latest funding rate data
+        """
+        if symbol:
+            return funding_rates.get(symbol, {})
+        else:
+            return funding_rates
+    
+    def get_funding_rate(self, symbol: str) -> float:
+        """
+        Get the current funding rate for a symbol.
+        
+        Args:
+            symbol: Symbol to get funding rate for
+            
+        Returns:
+            float: Current funding rate or 0 if not available
+        """
+        if symbol in funding_rates:
+            return funding_rates[symbol].get('funding_rate', 0)
+        return 0
+    
+    def get_next_funding_time(self, symbol: str) -> int:
+        """
+        Get the next funding time for a symbol.
+        
+        Args:
+            symbol: Symbol to get next funding time for
+            
+        Returns:
+            int: Next funding time in milliseconds or 0 if not available
+        """
+        if symbol in funding_rates:
+            return funding_rates[symbol].get('next_funding_time', 0)
+        return 0
+    
     def close(self):
         """
         Close the WebSocket connection.
@@ -715,6 +891,8 @@ class OkxWebSocketClient:
                     self.unsubscribe_orderbook(symbol, channel)
                 elif channel == "trades":
                     self.unsubscribe_trades(symbol)
+                elif channel == "funding-rate":
+                    self.unsubscribe_funding_rate(symbol)
             
             # Close connection
             self.ws.close()
