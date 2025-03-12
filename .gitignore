@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.env/
+.venv/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# IDE - PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+*.iws
+out/
+
+# IDE - Others
+.project
+.pydevproject
+.spyderproject
+.spyproject
+
+# Operating System
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project-specific files
+*.log
+funding_arbitrage.log
+config_live.json
+*_private.json
+*_secret.*
+
+# Credentials
+credentials/
+secrets/
+api_keys.json
+api_keys.py
+
+# Data
+data/
+*.csv
+*.xlsx
+*.json.bak
+
+# Local configuration
+local_settings.py
+local_config.json
