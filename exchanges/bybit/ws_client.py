@@ -156,8 +156,8 @@ class BybitWebSocketClient:
                 # Use default callback if available
                 elif self.default_callback:
                     self.default_callback(data)
-                else:
-                    logger.info(f"Received message for topic {topic}, but no callback registered")
+                # else:
+                #     logger.info(f"Received message for topic {topic}, but no callback registered")
             else:
                 # Handle other message types
                 logger.debug(f"Received message: {data}")
@@ -494,67 +494,113 @@ class BybitWebSocketClient:
                 return
             
             # Log raw data for debugging
-            logger.debug(f"Raw ticker data for {symbol}: {data}")
+            logger.debug(f"Received {message_type} for {symbol}: {message}")
             
-            # Get funding rate related fields directly 
+            # Standard fields we want to extract from any ticker message
             funding_rate = 0
             next_funding_time = 0
             
-            # Handle different data formats (snapshot vs delta, object vs array)
-            if isinstance(data, list):
-                if data:  # Use first item if data is a list
-                    data = data[0]
-                else:
-                    logger.warning(f"Empty data list for {symbol}")
-                    return
-            
-            # Now data should be a dict
-            if isinstance(data, dict):
-                # Try different field names for funding rate
-                if 'fundingRate' in data:
-                    funding_rate = float(data['fundingRate'])
-                elif 'r' in data:  # Some APIs use shortened field names
-                    funding_rate = float(data['r'])
-                    
-                # Try different field names for next funding time
-                if 'nextFundingTime' in data:
-                    next_funding_time = int(data['nextFundingTime'])
-                elif 'T' in data:  # Some APIs use shortened field names
-                    next_funding_time = int(data['T'])
-                    
-                # Store ticker data with focus on funding information
+            # Process based on message type
+            if message_type == "snapshot" or symbol not in self.ticker_data:
+                # For snapshot or new symbol, create fresh ticker data object with all fields
                 ticker_data = {
                     'symbol': symbol,
-                    'funding_rate': funding_rate,
-                    'next_funding_time': next_funding_time
+                    'timestamp': message.get("ts", int(time.time() * 1000)),
+                    'checksum': message.get("cs", 0)
                 }
                 
-                # Add all other fields dynamically
-                for key, value in data.items():
-                    # Convert common numeric fields to float
-                    if key in ['lastPrice', 'markPrice', 'indexPrice',
-                               'bid1Price', 'bid1Size', 'ask1Price', 'ask1Size',
-                               'highPrice24h', 'lowPrice24h', 'volume24h', 'turnover24h',
-                               'price24hPcnt', 'openInterest', 'openInterestValue']:
-                        try:
-                            ticker_data[key.lower()] = float(value)
-                        except (TypeError, ValueError):
+                # Process all fields from data
+                if isinstance(data, dict):
+                    # Extract key fields with specific handling
+                    if 'fundingRate' in data:
+                        funding_rate = float(data['fundingRate'])
+                        ticker_data['funding_rate'] = funding_rate
+                    
+                    if 'nextFundingTime' in data:
+                        next_funding_time = int(data['nextFundingTime'])
+                        ticker_data['next_funding_time'] = next_funding_time
+                    
+                    if 'markPrice' in data:
+                        ticker_data['mark_price'] = float(data['markPrice'])
+                    
+                    # Copy all other fields, converting numeric values to float where appropriate
+                    for key, value in data.items():
+                        # Skip already processed special fields
+                        if key in ['fundingRate', 'nextFundingTime', 'markPrice']:
+                            continue
+                        
+                        # Try to convert numeric values to float
+                        if key in ['lastPrice', 'indexPrice', 'highPrice24h', 'lowPrice24h', 
+                                  'prevPrice24h', 'price24hPcnt', 'openInterest', 'openInterestValue',
+                                  'turnover24h', 'volume24h', 'bid1Price', 'bid1Size', 
+                                  'ask1Price', 'ask1Size']:
+                            try:
+                                ticker_data[key.lower()] = float(value)
+                            except (TypeError, ValueError):
+                                ticker_data[key.lower()] = value
+                        else:
                             ticker_data[key.lower()] = value
-                    else:
-                        ticker_data[key.lower()] = value
+            
+            elif message_type == "delta":
+                # For delta messages, update only the changed fields
+                ticker_data = self.ticker_data.get(symbol, {}).copy()
+                ticker_data['timestamp'] = message.get("ts", int(time.time() * 1000))
+                ticker_data['checksum'] = message.get("cs", ticker_data.get('checksum', 0))
                 
-                # Make sure we have convenient access to key fields
-                if 'markprice' in ticker_data and 'mark_price' not in ticker_data:
-                    ticker_data['mark_price'] = ticker_data['markprice']
+                # Update only the fields present in the delta message
+                if isinstance(data, dict):
+                    # Handle key fields specifically
+                    if 'fundingRate' in data:
+                        funding_rate = float(data['fundingRate'])
+                        ticker_data['funding_rate'] = funding_rate
                     
-                if 'lastprice' in ticker_data and 'last_price' not in ticker_data:
-                    ticker_data['last_price'] = ticker_data['lastprice']
+                    if 'nextFundingTime' in data:
+                        next_funding_time = int(data['nextFundingTime'])
+                        ticker_data['next_funding_time'] = next_funding_time
                     
-                # Store the processed data
-                self.ticker_data[symbol] = ticker_data
+                    if 'markPrice' in data:
+                        ticker_data['mark_price'] = float(data['markPrice'])
+                    
+                    # Update other fields, converting numeric values where appropriate
+                    for key, value in data.items():
+                        # Skip already processed special fields
+                        if key in ['fundingRate', 'nextFundingTime', 'markPrice']:
+                            continue
+                            
+                        # Try to convert numeric values to float
+                        if key in ['lastPrice', 'indexPrice', 'highPrice24h', 'lowPrice24h', 
+                                  'prevPrice24h', 'price24hPcnt', 'openInterest', 'openInterestValue',
+                                  'turnover24h', 'volume24h', 'bid1Price', 'bid1Size', 
+                                  'ask1Price', 'ask1Size']:
+                            try:
+                                ticker_data[key.lower()] = float(value)
+                            except (TypeError, ValueError):
+                                ticker_data[key.lower()] = value
+                        else:
+                            ticker_data[key.lower()] = value
+            
+            else:
+                logger.warning(f"Unknown message type '{message_type}' for {symbol}")
+                return
+            
+            # Ensure we have the funding rate and mark price in a consistent format
+            # If we didn't extract funding rate from this message, use the existing value
+            if 'funding_rate' not in ticker_data and funding_rate == 0:
+                ticker_data['funding_rate'] = self.ticker_data.get(symbol, {}).get('funding_rate', 0)
                 
-                # Log successful update
-                logger.info(f"Updated ticker data for {symbol} - Funding rate: {funding_rate}, Next funding time: {next_funding_time}")
+            if 'next_funding_time' not in ticker_data and next_funding_time == 0:
+                ticker_data['next_funding_time'] = self.ticker_data.get(symbol, {}).get('next_funding_time', 0)
+            
+            # Ensure we have mark price in a standard field name
+            if 'mark_price' not in ticker_data and 'markprice' in ticker_data:
+                ticker_data['mark_price'] = ticker_data['markprice']
+            
+            # Store the updated ticker data
+            self.ticker_data[symbol] = ticker_data
+            
+            # Log successful update but only for important changes to avoid spam
+            if message_type == "snapshot" or 'funding_rate' in data or 'nextFundingTime' in data:
+                logger.debug(f"Updated {message_type} ticker data for {symbol} - Funding rate: {ticker_data.get('funding_rate', 0)}")
                 
         except Exception as e:
             logger.error(f"Error processing ticker data: {e}")
