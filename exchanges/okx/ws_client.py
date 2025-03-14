@@ -588,13 +588,26 @@ class OkxWebSocketClient:
         Subscribe to funding rate updates for a specific symbol.
         
         Args:
-            symbol: Symbol to subscribe to (e.g., "BTC-USD-SWAP")
+            symbol: Symbol to subscribe to (e.g., "BTC-USDT" or "BTC-USDT-SWAP")
             callback: Optional callback function for processing messages
         
         Returns:
             bool: True if subscription was successful, False otherwise
         """
         channel = "funding-rate"
+        
+        # Convert standard symbol format to OKX instrument ID if needed
+        if not symbol.endswith("-SWAP"):
+            # If it's in standard format like BTC-USDT, convert to BTC-USDT-SWAP
+            if "-" in symbol:
+                symbol = f"{symbol}-SWAP"
+            else:
+                # Handle format without hyphen like BTCUSDT
+                # Extract the base currency (everything except last 4 chars which are USDT)
+                base = symbol[:-4]
+                symbol = f"{base}-USDT-SWAP"
+        
+        logger.info(f"Subscribing to OKX funding rate for {symbol}")
         
         # Store the callback if provided
         if callback:
@@ -623,7 +636,7 @@ class OkxWebSocketClient:
                 logger.info(f"Subscribed to {channel} for {symbol}")
                 return True
             except Exception as e:
-                logger.error(f"Error subscribing to {channel} for {symbol}: {e}")
+                logger.error(f"Error subscribing to {channel} for {symbol}: {str(e)}")
                 return False
         else:
             # Connect first

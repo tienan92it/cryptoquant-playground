@@ -60,7 +60,7 @@ class CrossExchangeFundingArbitrageStrategy:
     Cross-exchange funding fee arbitrage strategy.
     
     This strategy:
-    1. Finds funding rate discrepancies between exchanges (e.g., Binance and Bybit)
+    1. Finds funding rate discrepancies between exchanges (Binance, Bybit, OKX)
     2. Takes opposing positions on different exchanges to neutralize price risk
     3. Profits from the net funding rate difference between the positions
     """
@@ -80,7 +80,8 @@ class CrossExchangeFundingArbitrageStrategy:
         self.check_interval = config.get('check_interval', 30)
         self.max_positions = config.get('risk_management', {}).get('max_positions', 5)
         self.use_all_symbols = config.get('use_all_symbols', False)
-        self.exchanges_to_use = config.get('exchanges', ['binance', 'bybit'])
+        # Set default to include all three exchanges
+        self.exchanges_to_use = config.get('exchanges', ['binance', 'bybit', 'okx'])
         
         # Ensure exchange names are lowercase for consistency
         self.exchanges_to_use = [e.lower() for e in self.exchanges_to_use]
@@ -264,45 +265,49 @@ class CrossExchangeFundingArbitrageStrategy:
                 # Bybit data with fallback to REST API
                 if 'bybit' in self.exchanges_to_use:
                     bybit_symbol = self.symbol_mappings.get(symbol, {}).get('bybit')
-                    if not bybit_symbol:
-                        continue
+                    if bybit_symbol:
+                        bybit_data = None
+                        # Try WebSocket first if connected
+                        if self.ws_connected.get('bybit'):
+                            bybit_data = self.ws_clients['bybit'].get_ticker_data(bybit_symbol)
                         
-                    bybit_data = None
-                    # Try WebSocket first if connected
-                    if self.ws_connected.get('bybit'):
-                        bybit_data = self.ws_clients['bybit'].get_ticker_data(bybit_symbol)
-                    
-                    # Fall back to REST API if needed
-                    if not bybit_data and hasattr(self, 'bybit_rest'):
-                        try:
-                            logger.debug(f"WebSocket data not available for {bybit_symbol}, trying REST API")
-                            bybit_data = self.bybit_rest.get_tickers(symbol=bybit_symbol)
-                            if bybit_data and len(bybit_data) > 0:
-                                bybit_data = bybit_data[0]
-                        except Exception as e:
-                            logger.warning(f"Error fetching {bybit_symbol} data from Bybit REST API: {str(e)}")
-                    
-                    if bybit_data:
-                        exchange_data['bybit'] = bybit_data
+                        # Fall back to REST API if needed
+                        if not bybit_data and hasattr(self, 'bybit_rest'):
+                            try:
+                                logger.debug(f"WebSocket data not available for {bybit_symbol}, trying REST API")
+                                bybit_data = self.bybit_rest.get_tickers(symbol=bybit_symbol)
+                                if bybit_data and len(bybit_data) > 0:
+                                    bybit_data = bybit_data[0]
+                            except Exception as e:
+                                logger.warning(f"Error fetching {bybit_symbol} data from Bybit REST API: {str(e)}")
+                        
+                        if bybit_data:
+                            exchange_data['bybit'] = bybit_data
+                    else:
+                        logger.debug(f"No Bybit mapping for {symbol}")
                 
                 # OKX data when available
                 if 'okx' in self.exchanges_to_use and self.ws_connected.get('okx'):
-                    okx_symbol = self.symbol_mappings.get(symbol, {}).get('okx')
-                    if okx_symbol:
-                        okx_data = self.ws_clients['okx'].get_funding_rate_data(okx_symbol)
+                    okx_inst_id = self.symbol_mappings.get(symbol, {}).get('okx_instid')
+                    if okx_inst_id:
+                        okx_data = self.ws_clients['okx'].get_funding_rate_data(okx_inst_id)
                         if okx_data:
                             exchange_data['okx'] = okx_data
+                    else:
+                        logger.debug(f"No OKX mapping for {symbol}")
                 
                 # Calculate metrics based on available exchange data
-                if 'binance' in exchange_data and 'bybit' in exchange_data:
+                if len(exchange_data) >= 2:  # Need at least 2 exchanges to calculate metrics
                     metrics = calculate_funding_metrics(
                         symbol=symbol,
-                        binance_data=exchange_data['binance'],
-                        bybit_data=exchange_data['bybit'],
+                        exchange_data=exchange_data,
                         config=self.config
                     )
                     if metrics:
                         new_metrics[symbol] = metrics
+                else:
+                    available = [ex for ex in exchange_data.keys()]
+                    logger.debug(f"Insufficient exchange data for {symbol}. Available: {available}")
             except Exception as e:
                 logger.error(f"Error calculating metrics for {symbol}: {str(e)}")
                 logger.debug(traceback.format_exc())
@@ -323,18 +328,14 @@ class CrossExchangeFundingArbitrageStrategy:
             if symbol not in self.positions:
                 continue
                 
-            # Get active status for each exchange
-            exchange_active = {
-                exchange: self.positions[symbol][exchange]['active']
-                for exchange in self.exchanges_to_use
-                if exchange in self.positions[symbol]
+            # Check if we have any active positions for this symbol
+            active_positions = {
+                exchange: position['active'] 
+                for exchange, position in self.positions[symbol].items() 
+                if position['active']
             }
             
-            # Check if we have active positions on all exchanges
-            all_active = all(exchange_active.values())
-            any_active = any(exchange_active.values())
-            
-            if all_active:
+            if active_positions:
                 try:
                     # Get latest metrics
                     metrics = self.metrics.get(symbol)
@@ -352,13 +353,21 @@ class CrossExchangeFundingArbitrageStrategy:
                             symbol_mappings=self.symbol_mappings,
                             exchanges_to_use=self.exchanges_to_use
                         )
+                        continue
                         
-                    # Check if sides need to be flipped
-                    binance_side = self.positions[symbol]['binance']['side']
-                    optimal_binance_side = metrics['binance_side']
+                    # Check if the best exchange pair has changed
+                    active_long_exchange = next((exchange for exchange, position in self.positions[symbol].items() 
+                                             if position['active'] and position['side'] == 'LONG'), None)
+                    active_short_exchange = next((exchange for exchange, position in self.positions[symbol].items() 
+                                              if position['active'] and position['side'] == 'SHORT'), None)
                     
-                    if binance_side != optimal_binance_side:
-                        logger.info(f"Optimal sides for {symbol} have changed, closing positions")
+                    best_long_exchange = metrics.get('long_exchange')
+                    best_short_exchange = metrics.get('short_exchange')
+                    
+                    # If the optimal exchanges have changed, close positions
+                    if ((active_long_exchange and active_long_exchange != best_long_exchange) or
+                        (active_short_exchange and active_short_exchange != best_short_exchange)):
+                        logger.info(f"Optimal exchange pair for {symbol} has changed, closing positions")
                         close_position(
                             symbol=symbol, 
                             positions=self.positions,
@@ -368,17 +377,6 @@ class CrossExchangeFundingArbitrageStrategy:
                         
                 except Exception as e:
                     logger.error(f"Error processing positions for {symbol}: {str(e)}")
-            
-            # If positions are inconsistent (some active, some not), close all
-            elif any_active:
-                active_exchanges = [e for e, active in exchange_active.items() if active]
-                logger.warning(f"Inconsistent positions for {symbol} (active on {active_exchanges}), closing all positions")
-                close_position(
-                    symbol=symbol, 
-                    positions=self.positions,
-                    symbol_mappings=self.symbol_mappings,
-                    exchanges_to_use=self.exchanges_to_use
-                )
     
     def open_new_positions(self):
         """
@@ -388,8 +386,7 @@ class CrossExchangeFundingArbitrageStrategy:
         active_positions = sum(
             1 for symbol in self.symbols 
             if symbol in self.positions 
-            and all(self.positions[symbol].get(exchange, {}).get('active', False) 
-                  for exchange in self.exchanges_to_use)
+            and any(position['active'] for exchange, position in self.positions[symbol].items())
         )
         
         # Calculate how many new positions we can open
@@ -400,8 +397,8 @@ class CrossExchangeFundingArbitrageStrategy:
             # Find top opportunities without active positions
             new_opportunities = [
                 item for item in self.opportunities 
-                if not all(self.positions[item['symbol']].get(exchange, {}).get('active', False) 
-                         for exchange in self.exchanges_to_use)
+                if not any(self.positions[item['symbol']][exchange]['active'] 
+                          for exchange in self.positions[item['symbol']])
             ]
             
             # Take positions in top N opportunities
@@ -412,14 +409,23 @@ class CrossExchangeFundingArbitrageStrategy:
                 symbol = opportunity['symbol']
                 metrics = opportunity['metrics']
                 
+                # Get the exchanges for this opportunity
+                long_exchange = metrics['long_exchange']
+                short_exchange = metrics['short_exchange']
+                
+                # Define the specific exchanges to use for this trade
+                trade_exchanges = [long_exchange, short_exchange]
+                
                 try:
-                    logger.info(f"Opening cross-exchange positions for top opportunity: {symbol}")
+                    logger.info(f"Opening arbitrage positions for {symbol}: Long on {long_exchange}, Short on {short_exchange}")
+                    
+                    # Execute the trade using the specified exchanges
                     success = execute_arbitrage(
                         symbol=symbol,
                         metrics=metrics,
                         positions=self.positions,
                         symbol_mappings=self.symbol_mappings,
-                        exchanges_to_use=self.exchanges_to_use
+                        exchanges_to_use=trade_exchanges
                     )
                     
                     if not success:

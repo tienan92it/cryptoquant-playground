@@ -2,10 +2,13 @@
   "symbols": ["btcusdt", "ethusdt", "solusdt", "bnbusdt", "xrpusdt", "adausdt"],
   "use_all_symbols": true,
   "position_size_usd": 1000,
-  "min_funding_threshold": 0.0001,
+  "min_funding_spread": 0.0005,
   "futures_fee_rate": 0.0004,
+  "bybit_fee_rate": 0.0006,
+  "okx_fee_rate": 0.0005,
   "slippage": 0.0003,
-  "check_interval": 1,
+  "check_interval": 10,
+  "exchanges": ["binance", "bybit", "okx"],
   
   "symbol_filters": {
     "min_price": 0.1,

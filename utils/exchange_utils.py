@@ -77,15 +77,37 @@ def fetch_okx_perpetual_symbols() -> List[str]:
     Returns:
         List of OKX symbol strings (e.g., "BTC-USDT")
     """
-    # This is a placeholder - in production you'd implement the OKX API call
-    okx_symbols = [
-        "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT", 
-        "ADA-USDT", "DOT-USDT", "LTC-USDT", "BNB-USDT", "MATIC-USDT",
-        "AVAX-USDT", "LINK-USDT", "UNI-USDT", "ATOM-USDT", "NEAR-USDT"
-    ]
-    
-    logger.info(f"Fetched {len(okx_symbols)} perpetual symbols from OKX")
-    return okx_symbols
+    try:
+        from exchanges.okx.rest_client import OkxRestClient
+        
+        # Create REST client
+        okx_client = OkxRestClient(testnet=False)
+        
+        try:
+            # Fetch perpetual symbols
+            okx_symbols = okx_client.get_perpetual_symbols()
+            logger.info(f"Fetched {len(okx_symbols)} perpetual symbols from OKX")
+            
+            # Also get the mapping from standard to OKX format
+            okx_instrument_mapping = okx_client.get_instrument_id_mapping()
+            logger.info(f"Created mapping for {len(okx_instrument_mapping)} OKX instruments")
+            
+            return okx_symbols
+        finally:
+            okx_client.close()
+    except Exception as e:
+        logger.error(f"Error fetching OKX symbols: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Return placeholder data for testing purposes
+        okx_symbols = [
+            "BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT", 
+            "ADA-USDT", "DOT-USDT", "LTC-USDT", "BNB-USDT", "MATIC-USDT",
+            "AVAX-USDT", "LINK-USDT", "UNI-USDT", "ATOM-USDT", "NEAR-USDT"
+        ]
+        
+        logger.info(f"Using placeholder data with {len(okx_symbols)} OKX symbols")
+        return okx_symbols
 
 def create_symbol_mappings(
     binance_symbols: List[str], 
@@ -107,6 +129,17 @@ def create_symbol_mappings(
     mappings = {}
     common_symbols = []
     
+    # Log exchange symbol counts for debugging
+    logger.info(f"Creating mappings between exchanges - Binance: {len(binance_symbols)}, Bybit: {len(bybit_symbols)}, OKX: {len(okx_symbols)}")
+    
+    # Convert OKX symbols to standard format for fast lookup
+    okx_standard_map = {}
+    for symbol in okx_symbols:
+        if '-' in symbol:
+            base, quote = symbol.split('-', 1)  # Split only on first hyphen
+            standard_no_hyphen = f"{base}{quote}"
+            okx_standard_map[standard_no_hyphen.upper()] = symbol
+    
     # Use Binance format as the standard
     for std_symbol in binance_symbols:
         # We use uppercase without hyphens as standard format
@@ -126,25 +159,44 @@ def create_symbol_mappings(
         elif bybit_format2 in bybit_symbols:
             mapping['bybit'] = bybit_format2
         else:
-            is_common = False
+            # Consider as missing in Bybit
+            is_common = bybit_symbols == []  # Only required if Bybit is used
         
-        # Find OKX equivalent
-        okx_format1 = f"{base}-USDT"  # With hyphen
-        okx_format2 = std_symbol      # Without hyphen
-        
-        if okx_format1 in okx_symbols:
-            mapping['okx'] = okx_format1
-        elif okx_format2 in okx_symbols:
-            mapping['okx'] = okx_format2
+        # Find OKX equivalent - more comprehensive approach
+        if std_symbol in okx_standard_map:
+            # Direct match found in our prepared map
+            mapping['okx'] = okx_standard_map[std_symbol]
+            mapping['okx_instid'] = f"{mapping['okx']}-SWAP"  # Add the -SWAP suffix for WebSocket
         else:
-            # Only consider OKX if it's in the list of symbols
-            if okx_symbols:  
-                is_common = False
+            # Try different formats
+            okx_format1 = f"{base}-USDT"  # With hyphen
+            
+            if okx_format1 in okx_symbols:
+                mapping['okx'] = okx_format1
+                mapping['okx_instid'] = f"{okx_format1}-SWAP"
+            else:
+                # Consider as missing in OKX
+                is_common = is_common and okx_symbols == []  # Only required if OKX is used
         
-        # If this symbol is available on all exchanges we're using
+        # If this symbol is available on all required exchanges we're using
         if is_common:
             common_symbols.append(std_symbol)
             mappings[std_symbol] = mapping
+            
+        elif 'okx' not in mapping and okx_symbols:  # If OKX is being used but symbol is missing
+            logger.debug(f"Symbol {std_symbol} not available on OKX")
+    
+    # Log information about mapping results
+    exchanges_required = sum([1 for x in [binance_symbols, bybit_symbols, okx_symbols] if x])
+    logger.info(f"Found {len(common_symbols)} symbols available across {exchanges_required} required exchanges")
+    
+    # Debug output for specific symbols if they're in the list
+    test_symbols = ["BTCUSDT", "ETHUSDT", "CATIUSDT"]
+    for symbol in test_symbols:
+        if symbol in mappings:
+            logger.info(f"Mapping for {symbol}: {mappings[symbol]}")
+        else:
+            logger.info(f"No mapping created for {symbol}")
     
     return common_symbols, mappings
 

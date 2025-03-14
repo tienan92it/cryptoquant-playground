@@ -9,8 +9,7 @@ logger = logging.getLogger(__name__)
 
 def calculate_funding_metrics(
     symbol: str,
-    binance_data: Dict[str, Any],
-    bybit_data: Dict[str, Any],
+    exchange_data: Dict[str, Dict[str, Any]],
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
@@ -18,83 +17,120 @@ def calculate_funding_metrics(
     
     Args:
         symbol: Symbol to calculate metrics for
-        binance_data: Funding and price data from Binance
-        bybit_data: Funding and price data from Bybit
+        exchange_data: Dictionary with funding and price data from all exchanges
         config: Strategy configuration
         
     Returns:
         Dictionary of calculated metrics or None if data is insufficient
     """
-    if not binance_data or not bybit_data:
+    # Need data from at least 2 exchanges to calculate metrics
+    if len(exchange_data) < 2:
         return None
     
-    # Extract funding rates
-    binance_funding_rate = float(binance_data.get('funding_rate', 0))
-    bybit_funding_rate = float(bybit_data.get('funding_rate', 0))
+    # Store all funding rates
+    funding_rates = {}
+    mark_prices = {}
+    next_funding_times = {}
     
-    # Fallback for Bybit if using older field name
-    if bybit_funding_rate == 0 and 'fundingRate' in bybit_data:
-        bybit_funding_rate = float(bybit_data.get('fundingRate', 0))
+    # Extract data from each exchange
+    for exchange, data in exchange_data.items():
+        if not data:
+            continue
+            
+        # Extract funding rate based on available field names
+        funding_rate = None
+        if 'funding_rate' in data:
+            funding_rate = float(data['funding_rate'])
+        elif 'fundingRate' in data:
+            funding_rate = float(data['fundingRate'])
+            
+        if funding_rate is not None:
+            funding_rates[exchange] = funding_rate
+            
+        # Extract mark price
+        mark_price = None
+        if 'mark_price' in data:
+            mark_price = float(data['mark_price'])
+        elif 'markPrice' in data:
+            mark_price = float(data['markPrice'])
+            
+        if mark_price is not None and mark_price > 0:
+            mark_prices[exchange] = mark_price
+            
+        # Extract next funding time
+        next_funding_time = None
+        if 'next_funding_time' in data:
+            next_funding_time = int(data['next_funding_time'])
+        elif 'nextFundingTime' in data:
+            next_funding_time = int(data['nextFundingTime'])
+            
+        if next_funding_time is not None and next_funding_time > 0:
+            next_funding_times[exchange] = next_funding_time
+    
+    # Skip if we don't have funding rates from at least 2 exchanges
+    if len(funding_rates) < 2:
+        return None
         
-    # Calculate spread
-    funding_spread = binance_funding_rate - bybit_funding_rate
-    abs_funding_spread = abs(funding_spread)
+    # Calculate all possible funding rate pairs and find the best one
+    exchange_pairs = []
     
-    # Determine trading sides
-    binance_side = "LONG" if binance_funding_rate < bybit_funding_rate else "SHORT"
-    bybit_side = "SHORT" if binance_side == "LONG" else "LONG"
+    for long_exchange in funding_rates:
+        for short_exchange in funding_rates:
+            if long_exchange == short_exchange:
+                continue
+                
+            # Calculate funding rate spread (long pays negative rate, short pays positive rate)
+            spread = funding_rates[short_exchange] - funding_rates[long_exchange]
+            
+            # Store this pair if both exchanges have mark prices
+            if long_exchange in mark_prices and short_exchange in mark_prices:
+                exchange_pairs.append({
+                    'long_exchange': long_exchange,
+                    'short_exchange': short_exchange,
+                    'funding_spread': spread,
+                    'abs_funding_spread': abs(spread)
+                })
+                
+    # If no valid pairs found, return None
+    if not exchange_pairs:
+        return None
+        
+    # Find the pair with the highest absolute funding spread
+    best_pair = max(exchange_pairs, key=lambda x: x['abs_funding_spread'])
     
-    # Extract mark prices
-    binance_mark_price = float(binance_data.get('mark_price', 0))
+    # Get the exchange names for this pair
+    long_exchange = best_pair['long_exchange']
+    short_exchange = best_pair['short_exchange']
     
-    # Extract Bybit mark price with fallback
-    if 'mark_price' in bybit_data:
-        bybit_mark_price = float(bybit_data['mark_price'])
-    elif 'markPrice' in bybit_data:
-        bybit_mark_price = float(bybit_data['markPrice'])
-    else:
-        bybit_mark_price = binance_mark_price  # Fallback
-    
-    # Calculate next funding times
-    now_ms = int(time.time() * 1000)
-    binance_next_funding_time = binance_data.get('next_funding_time', 0)
-    
-    # Extract Bybit next funding time with fallback
-    if 'next_funding_time' in bybit_data:
-        bybit_next_funding_time = bybit_data.get('next_funding_time', 0)
-    elif 'nextFundingTime' in bybit_data:
-        bybit_next_funding_time = bybit_data.get('nextFundingTime', 0)
-    else:
-        bybit_next_funding_time = 0
-    
-    # Calculate time until next funding
-    binance_time_to_funding_ms = max(0, binance_next_funding_time - now_ms)
-    bybit_time_to_funding_ms = max(0, bybit_next_funding_time - now_ms)
-    
-    # Use the earliest funding time
-    if binance_time_to_funding_ms > 0 and bybit_time_to_funding_ms > 0:
-        time_to_funding_ms = min(binance_time_to_funding_ms, bybit_time_to_funding_ms)
-    elif binance_time_to_funding_ms > 0:
-        time_to_funding_ms = binance_time_to_funding_ms
-    elif bybit_time_to_funding_ms > 0:
-        time_to_funding_ms = bybit_time_to_funding_ms
-    else:
-        time_to_funding_ms = 28800000  # Default to 8 hours
-    
-    time_to_funding_hours = time_to_funding_ms / (1000 * 60 * 60)
-    
-    # Calculate position sizes
-    notional_value = config.get('position_size_usd', 1000)
-    binance_qty = notional_value / binance_mark_price if binance_mark_price > 0 else 0
-    bybit_qty = notional_value / bybit_mark_price if bybit_mark_price > 0 else 0
+    # Calculate trading parameters for the best pair
+    funding_spread = best_pair['funding_spread']
+    abs_funding_spread = best_pair['abs_funding_spread']
     
     # Calculate trading costs
-    binance_fee = notional_value * config.get('futures_fee_rate', 0.0004) * 2  # Entry and exit
-    bybit_fee = notional_value * config.get('bybit_fee_rate', 0.0006) * 2      # Entry and exit
-    slippage_cost = notional_value * config.get('slippage', 0.0003) * 4        # Total slippage
-    total_trading_cost = binance_fee + bybit_fee + slippage_cost
+    notional_value = config.get('position_size_usd', 1000)
     
-    # Calculate expected profit
+    # Calculate quantities based on mark prices
+    long_qty = notional_value / mark_prices[long_exchange] if mark_prices[long_exchange] > 0 else 0
+    short_qty = notional_value / mark_prices[short_exchange] if mark_prices[short_exchange] > 0 else 0
+    
+    # Calculate trading costs for each exchange
+    fee_rates = {
+        'binance': config.get('futures_fee_rate', 0.0004),
+        'bybit': config.get('bybit_fee_rate', 0.0006),
+        'okx': config.get('okx_fee_rate', 0.0005)
+    }
+    
+    # Entry and exit fees for both exchanges
+    long_fee = notional_value * fee_rates.get(long_exchange, 0.0006) * 2
+    short_fee = notional_value * fee_rates.get(short_exchange, 0.0006) * 2
+    
+    # Calculate slippage (entry and exit on two exchanges)
+    slippage_cost = notional_value * config.get('slippage', 0.0003) * 4
+    
+    # Total trading cost
+    total_trading_cost = long_fee + short_fee + slippage_cost
+    
+    # Calculate expected profit for a single funding interval
     expected_profit_per_funding = abs_funding_spread * notional_value
     
     # Calculate break-even events
@@ -102,6 +138,26 @@ def calculate_funding_metrics(
         break_even_events = max(1, math.ceil(total_trading_cost / expected_profit_per_funding))
     else:
         break_even_events = float('inf')
+        
+    # Calculate time until next funding
+    now_ms = int(time.time() * 1000)
+    
+    # Use the earliest funding time from either exchange
+    next_funding_time = 0
+    long_funding_time = next_funding_times.get(long_exchange, 0)
+    short_funding_time = next_funding_times.get(short_exchange, 0)
+    
+    if long_funding_time > 0 and short_funding_time > 0:
+        next_funding_time = min(long_funding_time, short_funding_time)
+    elif long_funding_time > 0:
+        next_funding_time = long_funding_time
+    elif short_funding_time > 0:
+        next_funding_time = short_funding_time
+    else:
+        next_funding_time = now_ms + 28800000  # Default to 8 hours if no funding time available
+        
+    time_to_funding_ms = max(0, next_funding_time - now_ms)
+    time_to_funding_hours = time_to_funding_ms / (1000 * 60 * 60)
     
     # Calculate annualized returns
     funding_events_per_year = 365 * 3  # Assuming 3 funding events per day
@@ -120,27 +176,22 @@ def calculate_funding_metrics(
         apy = 0
     
     # Format funding times for display
-    binance_next_funding_str = format_timestamp(binance_next_funding_time)
-    bybit_next_funding_str = format_timestamp(bybit_next_funding_time)
+    next_funding_str = format_timestamp(next_funding_time)
     
-    # Compile and return all metrics
-    return {
+    # Create the complete metrics dictionary
+    metrics = {
         'symbol': symbol,
-        'binance_funding_rate': binance_funding_rate,
-        'bybit_funding_rate': bybit_funding_rate,
+        'pair': f"{long_exchange.upper()}-{short_exchange.upper()}",
         'funding_spread': funding_spread,
         'abs_funding_spread': abs_funding_spread,
-        'binance_side': binance_side,
-        'bybit_side': bybit_side,
-        'binance_mark_price': binance_mark_price,
-        'bybit_mark_price': bybit_mark_price,
-        'binance_next_funding': binance_next_funding_str,
-        'bybit_next_funding': bybit_next_funding_str,
-        'next_funding_time': min(binance_next_funding_time, bybit_next_funding_time) if binance_next_funding_time > 0 and bybit_next_funding_time > 0 else max(binance_next_funding_time, bybit_next_funding_time),
+        'long_exchange': long_exchange,
+        'short_exchange': short_exchange,
         'time_to_funding_hours': time_to_funding_hours,
-        'binance_qty': binance_qty,
-        'bybit_qty': bybit_qty,
+        'next_funding_time': next_funding_time,
+        'next_funding_str': next_funding_str,
         'notional_value': notional_value,
+        'long_qty': long_qty,
+        'short_qty': short_qty,
         'expected_profit_per_funding': expected_profit_per_funding,
         'total_trading_cost': total_trading_cost,
         'break_even_events': break_even_events,
@@ -148,6 +199,15 @@ def calculate_funding_metrics(
         'apr': apr,
         'apy': apy
     }
+    
+    # Add exchange-specific data
+    for exchange in exchange_data.keys():
+        if exchange in funding_rates:
+            metrics[f'{exchange}_funding_rate'] = funding_rates[exchange]
+        if exchange in mark_prices:
+            metrics[f'{exchange}_mark_price'] = mark_prices[exchange]
+    
+    return metrics
 
 def format_timestamp(timestamp_ms):
     """Format millisecond timestamp to readable date/time"""
@@ -169,15 +229,16 @@ def rank_opportunities(metrics: Dict[str, Dict[str, Any]], min_funding_spread: f
     ranked = []
     
     for symbol, m in metrics.items():
-        # Only include profitable opportunities
+        # Only include profitable opportunities with sufficient spread
         if m['is_profitable'] and m['abs_funding_spread'] >= min_funding_spread:
             ranked.append({
                 'symbol': symbol,
+                'pair': m['pair'],
                 'funding_spread': m['funding_spread'],
                 'apr': m['apr'],
                 'break_even_events': m['break_even_events'],
-                'binance_side': m['binance_side'],
-                'bybit_side': m['bybit_side'],
+                'long_exchange': m['long_exchange'],
+                'short_exchange': m['short_exchange'],
                 'metrics': m
             })
     
